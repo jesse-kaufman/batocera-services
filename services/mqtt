@@ -1,0 +1,207 @@
+#!/bin/bash
+
+################################################################################
+# Self-contained user service for exposing all Batocera events to MQTT
+###############################################################################
+
+MQTT_HOST=mqtt.lloydnet.org
+MQTT_PORT=8883
+MQTT_USER=batocera
+MQTT_PASSWORD=Vb8dQNKCld0CjRoy6UyHURUH
+
+MQTT_BASE_TOPIC=batocera2mqtt/$(hostname)
+
+ES_EVENTS=(game-start game-end system-selected theme-changed settings-changed controls-changed config-changed quit reboot shutdown sleep wake achievements screensaver-start screensaver-stop)
+
+###############################################################################
+# Publish an event message to the MQTT broker as JSON dictionary.
+#
+# The first argument is the subtopic to publish to (source/event_name)
+# The remaining arguments are converted to a list of strings, which
+# is stored in the 'data' field of the message
+# An ISO-formatted 'timestamp' field is automatically added to the message
+#
+# Only executes if this service is enabled
+###############################################################################
+publish() {
+    if [[ " $(/usr/bin/batocera-settings-get system.services) " == *" mqtt "* ]]; then
+        subtopic="$1"
+        shift
+        
+        # Check if this is an image topic (binary file)
+        if [[ "$subtopic" == "game/image" ]]; then
+            # First argument should be the temp file path
+            file_path="$1"
+            if [[ -f "$file_path" ]]; then
+		echo "Posting image"
+                mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t "$MQTT_BASE_TOPIC/$subtopic" -f "$file_path" -r -q 1
+            else
+                echo "Error: Image file not found: $file_path" >&2
+            fi
+            return
+        fi
+        
+        # Check if this is a state topic
+        if [[ "$subtopic" == "state" ]]; then
+            event_type="$1"
+            shift
+        fi
+        
+        # Initialize an empty JSON array
+        data='['
+        # Iterate over the remaining arguments
+        for arg in "$@"; do
+            data+="$(jq -Rn --arg arg "$arg" '$arg'),"
+        done
+        data="${data%,}]"
+        message='{"type": "'"$event_type"'", "data": '"$data"', "timestamp": "'"$(date --iso-8601=s)"'"}'
+        mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USER" -P "$MQTT_PASSWORD" -r -t "$MQTT_BASE_TOPIC/$subtopic" -m "$message"
+    fi
+}
+
+###############################################################################
+# Start the MQTT service.
+# - Installs any missing support files
+# - Publishes a system start event
+###############################################################################
+start() {
+    install
+    publish "state" "system-start"
+    publish "system-start"
+}
+
+###############################################################################
+# Stop the MQTT service.
+# - Publishes a system shutdown event
+###############################################################################
+stop() {
+    publish "state" "system-shutdown"
+    publish "system-shutdown"
+}
+
+###############################################################################
+# Create scripts that capture events and publish them to the MQTT broker.
+###############################################################################
+install() {
+    # Install base scripts for EmulationStation events
+    for event in ${ES_EVENTS[@]}; do
+        script_dir="/userdata/system/configs/emulationstation/scripts/$event"
+        mkdir -p "$script_dir"
+        script="$script_dir/mqtt.sh"
+        if [[ -f "$script" ]]; then
+            echo "WARNING: Skipping installation of '$script', as it already exists"
+            continue
+        fi
+        echo "Installing '$script'"
+        cat <<-EOF > "$script"
+#!/bin/bash
+/userdata/system/services/mqtt publish "state" "$event" "\$@"
+EOF
+        chmod +x "$script"
+    done
+
+    # Install image info scripts for game-start events
+    script_dir="/userdata/system/configs/emulationstation/scripts/game-start"
+    echo $script_dir
+    script="$script_dir/mqtt-image.sh"
+    echo "Installing game-start image script ($script)"
+    cat <<-'EOF' > "$script"
+#!/bin/bash
+
+# Check if all 3 arguments are provided
+if [ $# -ne 3 ]; then
+    echo "Usage: $0 <full_rom_path> <filename_without_last_ext> <game_title>"
+    exit 1
+fi
+
+# Assign arguments to variables
+ROM_PATH="$1"
+FILENAME_NO_EXT="$2"
+GAME_TITLE="$3"
+
+# Get the directory containing the rom
+ROM_DIR=$(dirname "$ROM_PATH")
+
+# Append /images to the base directory
+IMAGE_DIR="${ROM_DIR}/images"
+
+# Check if the images directory exists
+if [ ! -d "$IMAGE_DIR" ]; then
+    echo "Images directory not found: $IMAGE_DIR"
+    exit 1
+fi
+
+# Get the base filename from ROM_PATH and strip all extensions
+BASE_FILENAME=$(basename "$ROM_PATH")
+
+# Search for matching image files
+IMAGE_FILE=$(find "$IMAGE_DIR" -maxdepth 1 -type f -iname "${BASE_FILENAME%%.*}-thumb.*" | head -n 1)
+
+# Check if an image was found
+if [ -z "$IMAGE_FILE" ]; then
+    echo "No image found matching: ${GAME_TITLE}-image.*"
+    exit 1
+fi
+
+echo "Found image: $IMAGE_FILE"
+
+# Create a temporary file
+TEMP_FILE=$(mktemp)
+
+# Convert to JPEG if PNG, otherwise copy
+if [[ "$IMAGE_FILE" =~ \.(png|PNG)$ ]]; then
+    ffmpeg -y -i "$IMAGE_FILE" -f mjpeg "$TEMP_FILE" 2>/dev/null
+else
+    cp "$IMAGE_FILE" "$TEMP_FILE"
+fi
+
+# Send payload using mqtt command
+/userdata/system/services/mqtt publish "game/image" "$TEMP_FILE"
+
+# Clean up
+rm "$TEMP_FILE"
+
+echo "Image sent via MQTT: $FILENAME"
+EOF
+    chmod +x "$script"
+}
+
+###############################################################################
+# Delete scripts that capture events and publish them to the MQTT broker.
+###############################################################################
+uninstall() {
+    image_script="/userdata/system/configs/emulationstation/scripts/game-start/mqtt-image.sh"
+    echo "Deleting '$image_script'"
+    rm "$image_script"
+
+    # Delete EmulationStation event scripts, and remove event directories if empty
+    for event in ${ES_EVENTS[@]}; do
+        script_dir="/userdata/system/configs/emulationstation/scripts/$event"
+        script="$script_dir/mqtt.sh"
+        echo "Deleting '$script'"
+        rm "$script"
+        if [ -z "$(ls -A "$script_dir")" ]; then
+            echo "Deleting empty directory '$script_dir'"
+            rm -rf "$script_dir"
+        fi
+    done
+
+}
+
+###############################################################################
+# Script entrypoint
+###############################################################################
+if [ $# -eq 0 ]; then
+    echo "ERROR: No arguments provided"
+    echo "Usage: mqtt publish|start|stop|install|uninstall [args]"
+    exit 1
+fi
+if [[ $(type -t "$1") == function ]]; then
+    FUNCTION="$1"
+    shift
+    $FUNCTION "$@"
+else
+    echo "ERROR: '$1' is not defined"
+    echo "Usage: mqtt publish|start|stop|install|uninstall [args]"
+    exit 1
+fi
