@@ -1,0 +1,72 @@
+#!/bin/bash
+# vim: set expandtab ts=4 sw=4 ai :
+
+# Common NFS options
+NFS_OPTS="rw,vers=4,rsize=1048576,wsize=1048576,hard,intr,noacl,proto=tcp,timeo=600,retrans=2,sec=sys"
+
+# 1. Config: Server | Remote Path | Local Mount Point
+MOUNTS=(
+    "192.168.22.11:/home/storage/media   /home/storage/media"
+    "192.168.22.11:/home/storage/4tbhdd  /home/storage/4tbhdd"
+    "192.168.22.10:/home/storage/2tbsdd/music  /home/storage/music"
+)
+
+
+# Colors
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+RESET='\033[0m'
+
+# Reusable status check
+get_status() {
+
+    if grep -qs "$1" /proc/mounts; then
+        echo -e "${GREEN}MOUNTED${RESET}"
+    else
+        echo -e "${RED}NOT MOUNTED${RESET}"
+    fi
+}
+
+case "$1" in
+    start)
+	    # Make sure network is up
+	    sleep 2
+
+        # Mount the shares
+        echo "Mounting NFS shares..."
+
+        for entry in "${MOUNTS[@]}"; do
+            read -r REMOTE LOCAL <<< "$entry"
+            
+            echo -n "Mounting $LOCAL ... "
+            mkdir -p "$LOCAL"
+            mount -t nfs -o $NFS_OPTS "$REMOTE" "$LOCAL"
+            echo $(get_status "$LOCAL")
+        done
+        ;;
+    stop)
+        echo "Unmounting NFS shares..."
+        for entry in "${MOUNTS[@]}"; do
+            read -r REMOTE LOCAL <<< "$entry"
+
+            umount -l "$LOCAL"
+            echo "Unmounted: $LOCAL"
+        done
+        ;;
+    status)
+	    # Show status
+        printf "\n%-30s %s\n" "MOUNT POINT" "STATUS"
+        printf "%-30s %s\n" "-----------" "------"
+        
+        for entry in "${MOUNTS[@]}"; do
+            read -r REMOTE LOCAL <<< "$entry"
+            printf "%-30s %s\n" "$LOCAL" "[ $(get_status "$LOCAL") ]"
+        done
+        echo ""
+	    ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        ;;
+esac
+
+exit $?
