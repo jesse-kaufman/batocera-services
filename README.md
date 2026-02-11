@@ -3,9 +3,9 @@
 This repository holds various common Batocera services I use across multiple Batocera installs.
 
 It includes:
-1. aaa_mounts (mounts network filesystems)
-2. mqtt (sends events to MQTT; _being deprecated soon_)
-3. docker (Docker)
+1. `aaa_mounts` (mounts network filesystems)
+2. `mqtt` (sends events to MQTT; _being deprecated soon_)
+3. `docker` (Docker)
 
 ## Network Mounts (aaa_mounts)
 
